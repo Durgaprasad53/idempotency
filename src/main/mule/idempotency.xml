@@ -289,6 +289,19 @@ vars.entryValue&#93;&#93;></ee:set-payload>
 		<raise-error doc:name="Raise error" doc:id="ab664225-794c-48bc-886b-39b66ef12fbe" type="APP:CUSTOM_ERROR" description="Customer validation failed"/>
 		<logger level="INFO" doc:name="Logger" doc:id="6c3e9cce-2f2b-4f83-b21e-95c61ef85928" message="durga"/>
 	</sub-flow>
+	<flow name="idempotencyFlow1" doc:id="79020437-46a0-435b-b28e-300f7f7b5323" >
+		<http:listener doc:name="Listener" doc:id="9daff6d2-e9d1-4867-b1fc-a889b5abbe71" config-ref="HTTP_Listener_config" path="/updates"/>
+		<set-payload value='#[{&#10;	"name": "DurgaPrasad",&#10;	"age": 21&#10;}]' doc:name="Set Payload" doc:id="f76e2275-99cf-4c77-adb3-26037c64048b" />
+		<logger level="INFO" doc:name="Logger" doc:id="b63822c5-eee8-4815-89d5-45e96537d6c9" message="#[payload]"/>
+		<ee:transform doc:name="Transform Message" doc:id="ef76ff4f-b180-4566-b239-9af6285daf73" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
 
 
 </mule>
