@@ -4,7 +4,7 @@
 	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
 	<modelVersion>4.0.0</modelVersion>
 
-	<groupId>80204114-3359-4a12-a06c-b0a19a6ebd9d</groupId>
+	<groupId>acbc1811-3f3d-4f0e-8cd9-0c7bdc903b1a</groupId>
 	<artifactId>idempotency</artifactId>
 	<version>1.0.0-SNAPSHOT</version>
 	<packaging>mule-application</packaging>
@@ -37,14 +37,18 @@
 						<provider>MC</provider>
 						<muleVersion>4.9.11</muleVersion>
 						<server>anypoint-exchange-v3</server>
-						<username>Durga-Aug</username>
-						<password>Durga@53</password>
-						<businessGroupId>80204114-3359-4a12-a06c-b0a19a6ebd9d</businessGroupId>
+
+						<username>${anypoint.user}</username>
+						<password>${anypoint.pw}</password>
+
+						<businessGroupId>${anypoint.businessGroup}</businessGroupId>
 						<environment>Sandbox</environment>
 						<target>Cloudhub-US-East-2</target>
-						<applicationName>idempotency</applicationName>
+						<applicationName>${appname}</applicationName>
+
 						<replicas>1</replicas>
 						<vCores>0.1</vCores>
+
 						<deploymentSettings>
 							<lastMileSecurity>false</lastMileSecurity>
 							<forwardSslSession>false</forwardSslSession>
@@ -59,7 +63,7 @@
 		<repository>
 			<id>anypoint-exchange-v3</id>
 			<name>Anypoint Exchange</name>
-			<url>https://maven.anypoint.mulesoft.com/api/v3/organizations/80204114-3359-4a12-a06c-b0a19a6ebd9d/maven</url>
+			<url>https://maven.anypoint.mulesoft.com/api/v3/organizations/acbc1811-3f3d-4f0e-8cd9-0c7bdc903b1a/maven</url>
 			<layout>default</layout>
 		</repository>
 	</distributionManagement>
