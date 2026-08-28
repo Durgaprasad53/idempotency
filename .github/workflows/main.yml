@@ -24,8 +24,8 @@ jobs:
       - name: Publish to Exchange
         run: |
           mvn deploy --settings .settings/settings.xml -DskipMunitTests \
-          -Danypoint.user="Durga-Aug" \
-          -Danypoint.pw="Durga@53"
+          -Danypoint.user="JahnaviAug" \
+          -Danypoint.pw="Jahnavi@2002"
 
   deploydev:
     needs: build  
@@ -44,8 +44,8 @@ jobs:
       - name: Deploy to dev
         run: |
           mvn deploy --settings .settings/settings.xml -DskipMunitTests -DmuleDeploy \
-          -Danypoint.user="Durga-Aug" \
-          -Danypoint.pw="Durga@53" \
-          -Danypoint.businessGroup="80204114-3359-4a12-a06c-b0a19a6ebd9d" \
-          -Denv="dev" \
+          -Danypoint.user="JahnaviAug" \
+          -Danypoint.pw="Jahnavi@2002" \
+          -Danypoint.businessGroup="acbc1811-3f3d-4f0e-8cd9-0c7bdc903b1a" \
+          -Denv="Sandbox" \
           -Dappname="idempotency" 
