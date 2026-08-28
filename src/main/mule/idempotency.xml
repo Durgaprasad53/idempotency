@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:os="http://www.mulesoft.org/schema/mule/os"
+	xmlns:validation="http://www.mulesoft.org/schema/mule/validation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+
+	<!-- ============================================================ -->
+	<!-- GLOBAL CONFIGS                                                -->
+	<!-- ============================================================ -->
+
+	
+
+	<!-- ============================================================ -->
+	<!-- MAIN FLOW: HTTP entry point + idempotency check               -->
+	<!-- ============================================================ -->
+
+	<http:request-config name="HTTP_Request_config" doc:name="HTTP Request config" doc:id="360bf363-184e-4959-a15d-635abfeccbb2" >
+		<http:request-connection />
+	</http:request-config>
+	<flow name="process-transaction-flow" doc:id="de55cf8d-6ea0-4527-aca2-ceaad0742b13">
+		<http:listener config-ref="HTTP_Listener_config" path="/transactions" allowedMethods="POST">
+			<http:response statusCode="#[vars.httpStatus default 200]"/>
+			<http:error-response statusCode="#[vars.httpStatus default 500]">
+				<http:body><![CDATA[#[payload]]]></http:body>
+			</http:error-response>
+		</http:listener>
+
+		<set-variable variableName="txnId"
+			value="#[payload.transactionId default vars.httpAttributes.headers.'x-transaction-id']"/>
+
+		<validation:is-not-blank-string value="#[vars.txnId]" message="transactionId is required (in payload or X-Transaction-Id header)"/>
+
+		<try doc:name="Claim and process">
+			<try doc:name="Claim key (atomic)">
+				<!-- Atomic claim: failIfPresent="true" makes this throw OS:KEY_ALREADY_EXISTS
+				     if another request already claimed this txnId. This IS the idempotency check -
+				     no separate os:contains needed. -->
+				<os:store doc:name="Claim key" key="#[vars.txnId]" objectStore="paymentStore" failIfPresent="true">
+					<os:value><![CDATA[#[output application/json
+---
+{ status: "IN_PROGRESS", claimedAt: now() }]]]></os:value>
+				</os:store>
+
+				<!-- Only reached if the claim above succeeded, i.e. this request owns the key -->
+				<try doc:name="Process and release on failure">
+					<flow-ref doc:name="process-payment-subflow" name="process-payment-subflow"/>
+
+					<!-- Overwrite the IN_PROGRESS placeholder with the final result.
+					     failIfPresent="false" is intentional here - the placeholder key already exists,
+					     and we want this store to succeed and replace it, not throw. -->
+					<os:store doc:name="Store final result" key="#[vars.txnId]" objectStore="paymentStore" failIfPresent="false">
+						<os:value><![CDATA[#[output application/json
+---
+payload ++ { status: "COMPLETED", completedAt: now() }]]]></os:value>
+					</os:store>
+
+					<set-variable variableName="httpStatus" value="200"/>
+
+					<error-handler>
+						<!-- Processing itself failed downstream: remove the claim so the client
+						     (or a retry with the same txnId) is not permanently locked out for 24h. -->
+						<on-error-propagate doc:name="Release claim on failure">
+							<os:remove doc:name="Remove claim" key="#[vars.txnId]" objectStore="paymentStore"/>
+						</on-error-propagate>
+					</error-handler>
+				</try>
+
+				<error-handler>
+					<!-- Someone else already claimed/completed this txnId -->
+					<on-error-continue type="OS:KEY_ALREADY_EXISTS" doc:name="Handle duplicate">
+						<os:retrieve doc:name="Retrieve existing" key="#[vars.txnId]" objectStore="paymentStore"/>
+
+						<choice doc:name="Completed or still in progress?">
+							<when expression="#[payload.status == 'COMPLETED']">
+								<set-variable variableName="httpStatus" value="200"/>
+							</when>
+							<otherwise>
+								<ee:transform doc:name="Build 409 body">
+									<ee:message>
+										<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+	message: "Transaction is already being processed",
+	transactionId: vars.txnId
+}]]></ee:set-payload>
+									</ee:message>
+								</ee:transform>
+								<set-variable variableName="httpStatus" value="409"/>
+							</otherwise>
+						</choice>
+					</on-error-continue>
+				</error-handler>
+			</try>
+
+			<error-handler>
+				<!-- transactionId missing/blank -->
+				<on-error-propagate type="VALIDATION:VALIDATION" doc:name="Handle validation error">
+					<ee:transform doc:name="Build 400 body">
+						<ee:message>
+							<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+	message: error.description
+}]]></ee:set-payload>
+						</ee:message>
+					</ee:transform>
+					<set-variable variableName="httpStatus" value="400"/>
+				</on-error-propagate>
+
+				<!-- catch-all for anything unexpected -->
+				<on-error-propagate type="ANY" doc:name="Handle unexpected error">
+					<ee:transform doc:name="Build 500 body">
+						<ee:message>
+							<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+	message: "Unexpected error processing transaction",
+	detail: error.description
+}]]></ee:set-payload>
+						</ee:message>
+					</ee:transform>
+					<set-variable variableName="httpStatus" value="500"/>
+				</on-error-propagate>
+			</error-handler>
+		</try>
+	</flow>
+
+	<!-- ============================================================ -->
+	<!-- SUBFLOW: actual payment/order processing business logic       -->
+	<!-- Replace the transform below with real downstream calls        -->
+	<!-- (payment gateway, DB insert, etc).                             -->
+	<!-- ============================================================ -->
+
+	<sub-flow name="process-payment-subflow" doc:id="ea93bd47-1f66-4b05-b80a-abb047474ca8">
+		<!-- TODO: replace with real processing - call payment gateway / persist order / etc -->
+		<ee:transform doc:name="Simulate processing result">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+payload ++ {
+	transactionId: vars.txnId,
+	processedAt: now()
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</sub-flow>
+
+	<!-- ============================================================ -->
+	<!-- SCHEDULER: purge stale IN_PROGRESS locks                      -->
+	<!--                                                                -->
+	<!-- Note: Object Store v2 already auto-expires COMPLETED entries  -->
+	<!-- via entryTtl (24h) - that part needs no manual cleanup.        -->
+	<!-- This scheduler is a safety net for a narrower case: a claim    -->
+	<!-- (IN_PROGRESS placeholder) that never got resolved because the  -->
+	<!-- worker crashed/restarted mid-processing, bypassing the normal  -->
+	<!-- error-handler cleanup in process-transaction-flow. Left alone, -->
+	<!-- such a lock would block retries for the full 24h TTL. This job -->
+	<!-- runs periodically and removes any IN_PROGRESS entry older than -->
+	<!-- staleLockThresholdMinutes.                                     -->
+	<!-- ============================================================ -->
+
+	<flow name="purge-stale-locks-scheduler-flow" doc:id="7237641a-674f-453f-8d12-36a1f639fc22">
+
+		<http:listener doc:name="Listener" doc:id="ce7d42c0-7d94-4096-903a-bde7ab4e4f1b" config-ref="HTTP_Listener_config" path="/scheduler"/>
+		<set-variable variableName="staleLockThresholdMinutes" value="#[30]"/>
+
+		<os:retrieve-all-keys doc:name="Get all keys" objectStore="paymentStore" target="allKeys"/>
+		<logger level="INFO" doc:name="Log scan start"
+			message="#['Purge job: scanning ' ++ (sizeOf(vars.allKeys) as String) ++ ' keys in paymentStore']"/>
+		<!-- [STUDIO:"Transform Message"]<ee:transform doc:name="Transform Message" doc:id="b7e966db-70a3-4c48-a0e5-cb64a33e4036">
+			<ee:message>
+			</ee:message>
+			<ee:variables>
+				<ee:set-variable variableName="entryValue"><![CDATA[%dw 2.0
+output application/json
+&#45;&#45;-
+vars.allKeys&#93;&#93;></ee:set-variable>
+			</ee:variables>
+		</ee:transform> [STUDIO] -->
+		<foreach doc:name="For each key" collection="#[vars.allKeys]">
+			<try doc:name="Evaluate and purge if stale">
+				<os:retrieve doc:name="Retrieve entry" key="#[payload]" objectStore="paymentStore" target="entryValue">
+					<os:default-value><![CDATA[#[null]]]></os:default-value>
+				</os:retrieve>
+
+				<ee:transform doc:name="Transform Message" doc:id="3bb8e0d8-fa24-4705-b47d-b6837da73549">
+			<ee:message>
+			</ee:message>
+					<ee:variables >
+						<ee:set-variable variableName="entryValue" ><![CDATA[ [] + payload]]></ee:set-variable>
+					</ee:variables>
+		</ee:transform>
+				<choice doc:name="Is this a stale IN_PROGRESS lock?">
+					<when expression="#[vars.entryValue != null]">
+						<os:remove doc:name="Remove stale lock" key="#[payload]" objectStore="paymentStore"/>
+						<logger level="WARN" doc:name="Log purge"
+							message="#['Purge job: removed stale IN_PROGRESS lock for transactionId=' ++ payload]"/>
+						<ee:transform doc:name="Transform Message" doc:id="64eaea4f-2704-46f9-aaa9-b31fca4031f3" >
+							<ee:message />
+							<ee:variables >
+								<ee:set-variable variableName="entryValue" ><![CDATA[%dw 2.0
+output application/json
+---
+vars.allKeys]]></ee:set-variable>
+							</ee:variables>
+						</ee:transform>
+					
+</when>
+				</choice>
+			</try>
+		</foreach>
+		<!-- [STUDIO:"Transform Message"]<ee:transform doc:name="Transform Message" doc:id="fb3906ca-55aa-423f-a337-16d780f51034" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+&#45;&#45;-
+vars.entryValue&#93;&#93;></ee:set-payload>
+			</ee:message>
+		</ee:transform> [STUDIO] -->
+	
+</flow>
+	<flow name="idempotencyFlow" doc:id="60d8efb9-6cbe-4cee-a658-d286ab519248" >
+		<http:listener doc:name="Listener" doc:id="306f9f55-4e59-406d-a38f-8f5a55f1382b" config-ref="HTTP_Listener_config" path="/demo"/>
+		<logger level="INFO" doc:name="Logger" doc:id="baf0f7a3-13ae-4178-a49f-afaf97d8743f" message="Incoming Payload"/>
+		<flow-ref doc:name="Flow Reference" doc:id="13f5dda6-c26b-49de-a389-e6a0fabfd86d" name="private-idempotencyFlow1"/>
+		<ee:transform doc:name="Transform Message" doc:id="f043167f-3c39-414b-b742-d1167c46041d" >
+			<ee:message >
+				<ee:set-payload ><![CDATA["success"]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<error-handler >
+			<!-- [STUDIO:"On Error Continue"]<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="85d9249f-47f5-474c-b777-6e8bdcbefa01" >
+				<logger level="INFO" doc:name="Logger" doc:id="b040f5e8-4dbf-4a36-bdc5-b77fb283429c" message="continue" />
+				<ee:transform doc:name="Transform Message" doc:id="351c5892-27d1-4f12-b6a6-9addd71ebc8a">
+					<ee:message>
+						<ee:set-payload><![CDATA["continue"&#93;&#93;></ee:set-payload>
+					</ee:message>
+				</ee:transform>
+			</on-error-continue> [STUDIO] -->
+			<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="a64828a3-8393-4896-9b41-83fae54aa461" >
+				<logger level="INFO" doc:name="Logger" doc:id="ae7521d5-d1ba-4bef-810c-5a48fa723ea7" message="stopped" />
+				<ee:transform doc:name="Transform Message" doc:id="21d6ed9f-0aa5-4d74-bf87-44975d73cba3" >
+					<ee:message >
+						<ee:set-payload ><![CDATA["stopped"]]></ee:set-payload>
+					</ee:message>
+				</ee:transform>
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+	<flow name="private-idempotencyFlow1" doc:id="0c52e334-64b7-4a9a-84ac-2ff7f47a1cb3" >
+		<logger level="INFO" doc:name="Logger" doc:id="636cc7d4-4996-415f-9c1a-4a088a4c5cb0" message="private"/>
+		<raise-error doc:name="Raise error" doc:id="05d4e5b8-2a41-4d5e-a8d8-007ac621b309" type="APP:CUSTOM_ERROR" description="Customer validation failed" />
+		<logger level="INFO" doc:name="Logger" doc:id="76ad8578-34ee-40bc-aa38-4df9894fb4e3" message="after-error"/>
+		<ee:transform doc:name="Transform Message" doc:id="f6f73021-b2b9-481c-8c21-7f5ae63bede1" >
+			<ee:message >
+				<ee:set-payload ><![CDATA["private"]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<error-handler >
+			<!-- [STUDIO:"On Error Continue"]<on-error-continue enableNotifications="true" logException="true" doc:name="On Error Continue" doc:id="e1ad1c4e-f540-4d7e-9b4f-4d4f10a6fd7b" >
+				<logger level="INFO" doc:name="Logger" doc:id="3a068c8b-dbdf-4da3-a8b0-76203b642aaf" message="private-continue" />
+				<ee:transform doc:name="Transform Message" doc:id="514c8c01-4368-4038-b547-f05901569542" >
+					<ee:message >
+						<ee:set-payload ><![CDATA["private-continue"&#93;&#93;></ee:set-payload>
+					</ee:message>
+				</ee:transform>
+			</on-error-continue> [STUDIO] -->
+			<on-error-propagate enableNotifications="true" logException="true" doc:name="On Error Propagate" doc:id="7b4ccbad-6a70-4775-a4ec-f0a8ffd24252" >
+				<logger level="INFO" doc:name="Logger" doc:id="ef2c0679-4bb0-426d-ba2d-c75d672e3fb4" message="private-stopped" />
+				<ee:transform doc:name="Transform Message" doc:id="fefc3928-0707-4ceb-9bcf-53a00396bb38" >
+					<ee:message >
+						<ee:set-payload ><![CDATA["private-stopped"]]></ee:set-payload>
+					</ee:message>
+				</ee:transform>
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+	<sub-flow name="idempotencySub_Flow" doc:id="9e076a15-5c9d-4a87-8c84-b410cbc613ea" >
+		<raise-error doc:name="Raise error" doc:id="ab664225-794c-48bc-886b-39b66ef12fbe" type="APP:CUSTOM_ERROR" description="Customer validation failed"/>
+		<logger level="INFO" doc:name="Logger" doc:id="6c3e9cce-2f2b-4f83-b21e-95c61ef85928" message="durga"/>
+	</sub-flow>
+
+
+</mule>
